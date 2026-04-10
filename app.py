@@ -4,7 +4,7 @@ import sqlite3
 import base64
 import pytz
 import io
-import bcrypt
+from passlib.hash import pbkdf2_sha256
 from datetime import datetime
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
 
@@ -43,10 +43,10 @@ conn = init_db()
 
 # --- FUNÇÕES DE SEGURANÇA ---
 def hash_password(password):
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    return pbkdf2_sha256.hash(password)
 
 def check_password(password, hashed):
-    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+    return pbkdf2_sha256.verify(password, hashed)
 
 # --- CAPTURA DE HORA LOCAL AUTOMÁTICA ---
 # Captura a hora do dispositivo do usuário para evitar fraudes de fuso horário do servidor
