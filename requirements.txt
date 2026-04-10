@@ -1,3 +1,6 @@
 streamlit
 pandas
 streamlit-js-eval
+pytz
+xlswriter
+bcrypt
