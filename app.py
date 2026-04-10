@@ -1,194 +1,187 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-from datetime import datetime
 import base64
-from streamlit_js_eval import get_geolocation
+import pytz
+import io
+import bcrypt
+from datetime import datetime
+from streamlit_js_eval import get_geolocation, streamlit_js_eval
 
-# --- CONFIGURAÇÃO DA INTERFACE ---
-st.set_page_config(page_title="PontoPro Enterprise v3", layout="wide", page_icon="🏢")
+# --- CONFIGURAÇÃO DE SEGURANÇA E INTERFACE ---
+st.set_page_config(page_title="PontoPro SaaS Edition", layout="wide", page_icon="🔐")
 
-# --- GERENCIAMENTO DE BANCO DE DADOS (SQLITE) ---
+# Estilização Profissional
+st.markdown("""
+    <style>
+    .main { background-color: #f0f2f6; }
+    div.stButton > button:first-child { background-color: #00416A; color: white; border-radius: 10px; }
+    .reportview-container .main .block-container { padding-top: 2rem; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- BANCO DE DADOS ROBUSTO ---
 def init_db():
-    conn = sqlite3.connect('ponto_empresa.db', check_same_thread=False)
+    conn = sqlite3.connect('pontopro_ultimate.db', check_same_thread=False)
     c = conn.cursor()
+    # Tabela de Empresas (Seus Clientes)
+    c.execute('''CREATE TABLE IF NOT EXISTS empresas 
+                 (id INTEGER PRIMARY KEY, nome TEXT, cnpj TEXT, senha_admin TEXT)''')
     # Tabela de Funcionários
     c.execute('''CREATE TABLE IF NOT EXISTS funcionarios 
-                 (id INTEGER PRIMARY KEY, nome TEXT NOT NULL, cargo TEXT, data_criacao TEXT)''')
-    # Tabela de Presença
+                 (id INTEGER PRIMARY KEY, empresa_id INTEGER, nome TEXT, cargo TEXT, 
+                  FOREIGN KEY(empresa_id) REFERENCES empresas(id))''')
+    # Tabela de Presença (O Core)
     c.execute('''CREATE TABLE IF NOT EXISTS presenca 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  func_id INTEGER, 
-                  data TEXT, 
-                  entrada TEXT, 
-                  saida TEXT, 
-                  foto_entrada TEXT, 
-                  foto_saida TEXT, 
-                  geo_entrada TEXT, 
-                  geo_saida TEXT,
-                  FOREIGN KEY(func_id) REFERENCES funcionarios(id))''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, func_id INTEGER, empresa_id INTEGER,
+                  data TEXT, entrada TEXT, saida TEXT, foto_ent TEXT, foto_sai TEXT, 
+                  geo_ent TEXT, geo_sai TEXT, horas_total TEXT)''')
     conn.commit()
     return conn
 
 conn = init_db()
 
-# --- FUNÇÕES UTILITÁRIAS ---
-def get_image_base64(image_file):
-    if image_file:
-        return base64.b64encode(image_file.getvalue()).decode()
-    return None
+# --- FUNÇÕES DE SEGURANÇA ---
+def hash_password(password):
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-# --- SIDEBAR ---
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2800/2800187.png", width=80)
-st.sidebar.title("PontoPro v3.0")
-app_mode = st.sidebar.selectbox("Escolha o Módulo", ["🕒 Registro de Ponto", "🔐 Painel Administrativo"])
+def check_password(password, hashed):
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
-# --- MÓDULO 1: REGISTRO DE PONTO (PARA O FUNCIONÁRIO) ---
-if app_mode == "🕒 Registro de Ponto":
-    st.title("⏱️ Registro de Presença Inteligente")
+# --- CAPTURA DE HORA LOCAL AUTOMÁTICA ---
+# Captura a hora do dispositivo do usuário para evitar fraudes de fuso horário do servidor
+client_time_str = streamlit_js_eval(js_expressions="new Date().toLocaleString('pt-BR')", key="js_time")
+
+# --- NAVEGAÇÃO ---
+st.sidebar.title("🏢 PontoPro SaaS")
+modulo = st.sidebar.selectbox("Ir para:", ["📲 Terminal do Funcionário", "📊 Painel da Empresa (RH)", "🛠 Admin Master (Você)"])
+
+# ----------------------------------------------------------------
+# MÓDULO 1: TERMINAL DO FUNCIONÁRIO (O que fica no Tablet/Celular)
+# ----------------------------------------------------------------
+if modulo == "📲 Terminal do Funcionário":
+    st.title("🕒 Registro de Ponto Digital")
     
-    # Captura de Localização via JS (Navegador)
-    loc = get_geolocation()
-    lat_long = f"{loc['coords']['latitude']}, {loc['coords']['longitude']}" if loc else "Localização não autorizada"
+    # 1. Seleção de Empresa (O funcionário escolhe a empresa dele)
+    empresas_df = pd.read_sql("SELECT id, nome FROM empresas", conn)
+    if empresas_df.empty:
+        st.error("Nenhuma empresa cadastrada no sistema.")
+    else:
+        lista_empresas = empresas_df['nome'].tolist()
+        emp_nome = st.selectbox("Selecione sua Empresa", lista_empresas)
+        emp_id = int(empresas_df[empresas_df['nome'] == emp_nome]['id'].values[0])
 
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        st.subheader("Passo 1: Identificação")
-        id_input = st.number_input("Digite seu ID de Funcionário", min_value=0, step=1)
-        
-        if id_input > 0:
-            query = "SELECT * FROM funcionarios WHERE id = ?"
-            user = pd.read_sql(query, conn, params=(id_input,))
+        # 2. Localização Automática
+        loc = get_geolocation()
+        if not loc:
+            st.warning("📍 O GPS é obrigatório. Por favor, autorize a localização no navegador.")
+        else:
+            lat_long = f"{loc['coords']['latitude']}, {loc['coords']['longitude']}"
             
-            if not user.empty:
-                st.success(f"Funcionário: **{user.iloc[0]['nome']}**")
-                st.info(f"📍 GPS detectado: {lat_long}")
+            col1, col2 = st.columns(2)
+            with col1:
+                id_func = st.number_input("Digite seu ID de Funcionário", min_value=1, step=1)
+                user = pd.read_sql(f"SELECT * FROM funcionarios WHERE id={id_func} AND empresa_id={emp_id}", conn)
                 
-                st.subheader("Passo 2: Biometria Facial")
-                foto = st.camera_input("Tire uma foto para validar")
-                
-                if foto:
-                    data_hoje = datetime.now().strftime("%Y-%m-%d")
-                    agora = datetime.now().strftime("%H:%M:%S")
-                    foto_b64 = get_image_base64(foto)
+                if not user.empty:
+                    st.success(f"Bem-vindo, **{user.iloc[0]['nome']}**")
+                    st.write(f"⏰ **Hora confirmada:** {client_time_str}")
                     
-                    # Checar se já existe registro hoje
-                    check_query = "SELECT * FROM presenca WHERE func_id = ? AND data = ?"
-                    registro_hoje = pd.read_sql(check_query, conn, params=(id_input, data_hoje))
-                    
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        btn_entrada = st.button("📥 Registrar Entrada", use_container_width=True)
-                        if btn_entrada:
-                            if registro_hoje.empty:
-                                cursor = conn.cursor()
-                                cursor.execute('''INSERT INTO presenca 
-                                    (func_id, data, entrada, saida, foto_entrada, geo_entrada) 
-                                    VALUES (?, ?, ?, ?, ?, ?)''', 
-                                    (id_input, data_hoje, agora, "---", foto_b64, lat_long))
+                    foto = st.camera_input("Reconhecimento Facial")
+                    if foto:
+                        img_b64 = base64.b64encode(foto.getvalue()).decode()
+                        data_hoje = datetime.now().strftime("%Y-%m-%d")
+                        agora_hora = datetime.now().strftime("%H:%M:%S")
+
+                        # Lógica de Entrada/Saída
+                        reg = pd.read_sql(f"SELECT * FROM presenca WHERE func_id={id_func} AND data='{data_hoje}'", conn)
+                        
+                        btn_col1, btn_col2 = st.columns(2)
+                        if reg.empty:
+                            if btn_col1.button("📥 REGISTRAR ENTRADA", use_container_width=True):
+                                conn.execute("INSERT INTO presenca (func_id, empresa_id, data, entrada, saida, foto_ent, geo_ent) VALUES (?,?,?,?,?,?,?)",
+                                            (id_func, emp_id, data_hoje, agora_hora, "---", img_b64, lat_long))
                                 conn.commit()
                                 st.balloons()
-                                st.success(f"Entrada confirmada às {agora}")
-                            else:
-                                st.warning("⚠️ Entrada já realizada hoje.")
-
-                    with c2:
-                        btn_saida = st.button("📤 Registrar Saída", use_container_width=True)
-                        if btn_saida:
-                            if not registro_hoje.empty and registro_hoje.iloc[0]['saida'] == "---":
-                                cursor = conn.cursor()
-                                cursor.execute('''UPDATE presenca SET saida = ?, foto_saida = ?, geo_saida = ? 
-                                                WHERE func_id = ? AND data = ?''', 
-                                                (agora, foto_b64, lat_long, id_input, data_hoje))
+                                st.rerun()
+                        elif reg.iloc[0]['saida'] == "---":
+                            if btn_col2.button("📤 REGISTRAR SAÍDA", use_container_width=True):
+                                conn.execute("UPDATE presenca SET saida=?, foto_sai=?, geo_sai=? WHERE id=?",
+                                            (agora_hora, img_b64, lat_long, int(reg.iloc[0]['id'])))
                                 conn.commit()
                                 st.snow()
-                                st.success(f"Saída confirmada às {agora}")
-                            else:
-                                st.error("❌ Erro: Saída já registrada ou entrada não realizada.")
-            else:
-                st.error("Funcionário não encontrado.")
+                                st.rerun()
+                        else:
+                            st.info("✅ Jornada de hoje concluída!")
 
-    with col2:
-        st.subheader("💡 Instruções")
-        st.write("""
-        1. Digite seu número de identificação.
-        2. Certifique-se de que sua localização está ativa.
-        3. Olhe para a câmera e tire a foto.
-        4. Clique no botão de entrada ou saída conforme sua jornada.
-        """)
-        st.image("https://cdn-icons-png.flaticon.com/512/3565/3565937.png", width=200)
-
-# --- MÓDULO 2: PAINEL ADMINISTRATIVO ---
-elif app_mode == "🔐 Painel Administrativo":
-    st.title("🔐 Gestão e Relatórios")
+# ----------------------------------------------------------------
+# MÓDULO 2: PAINEL DA EMPRESA (O que você vende para o dono da empresa)
+# ----------------------------------------------------------------
+elif modulo == "📊 Painel da Empresa (RH)":
+    st.title("📊 Gestão de Equipe")
     
-    senha = st.sidebar.text_input("Senha de Acesso", type="password")
-    if senha == "admin123": # Altere para uma senha forte
-        
-        tab1, tab2, tab3 = st.tabs(["📊 Relatórios Mensais", "👥 Gestão de Equipe", "🛠️ Sistema"])
-        
-        with tab1:
-            st.subheader("Filtro de Ponto")
-            # Carregar logs com nomes
-            df_logs = pd.read_sql('''SELECT p.*, f.nome, f.cargo FROM presenca p 
-                                     JOIN funcionarios f ON p.func_id = f.id''', conn)
+    empresas_df = pd.read_sql("SELECT id, nome, senha_admin FROM empresas", conn)
+    emp_nome = st.sidebar.selectbox("Sua Empresa", empresas_df['nome'].tolist())
+    senha_tentativa = st.sidebar.text_input("Senha RH", type="password")
+    
+    if senha_tentativa:
+        emp_data = empresas_df[empresas_df['nome'] == emp_nome].iloc[0]
+        if check_password(senha_tentativa, emp_data['senha_admin']):
+            emp_id = emp_data['id']
             
-            if not df_logs.empty:
-                df_logs['data'] = pd.to_datetime(df_logs['data'])
-                df_logs['Mes_Ano'] = df_logs['data'].dt.strftime('%m/%Y')
+            tab1, tab2, tab3 = st.tabs(["📝 Relatórios de Ponto", "👥 Cadastrar Funcionários", "📈 Insights"])
+            
+            with tab1:
+                df_logs = pd.read_sql(f"""SELECT p.*, f.nome FROM presenca p 
+                                         JOIN funcionarios f ON p.func_id = f.id 
+                                         WHERE p.empresa_id = {emp_id}""", conn)
                 
-                filtros = st.columns(2)
-                mes_selecionado = filtros[0].selectbox("Filtrar por Mês", df_logs['Mes_Ano'].unique())
-                df_filtrado = df_logs[df_logs['Mes_Ano'] == mes_selecionado]
+                if not df_logs.empty:
+                    # Filtro por mês
+                    df_logs['data'] = pd.to_datetime(df_logs['data'])
+                    mes_sel = st.selectbox("Selecione o Mês", df_logs['data'].dt.strftime('%m/%Y').unique())
+                    df_filtrado = df_logs[df_logs['data'].dt.strftime('%m/%Y') == mes_sel]
+                    
+                    st.dataframe(df_filtrado[['nome', 'data', 'entrada', 'saida', 'geo_ent']], use_container_width=True)
+                    
+                    # EXPORTAÇÃO EXCEL PROFISSIONAL
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                        df_filtrado.to_excel(writer, index=False, sheet_name='Ponto')
+                    st.download_button("📥 Baixar Excel Mensal", output.getvalue(), f"Ponto_{emp_nome}_{mes_sel}.xlsx")
                 
-                st.dataframe(df_filtrado[['id', 'nome', 'cargo', 'data', 'entrada', 'saida', 'geo_entrada']], use_container_width=True)
-                
-                st.subheader("Visualização de Auditoria (Fotos e GPS)")
-                for idx, row in df_filtrado.iterrows():
-                    with st.expander(f"Ver Detalhes: {row['nome']} - Dia {row['data'].strftime('%d/%m/%Y')}"):
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.write("**ENTRADA**")
-                            if row['foto_entrada']:
-                                st.image(f"data:image/png;base64,{row['foto_entrada']}", width=200)
-                            st.caption(f"📍 GPS: {row['geo_entrada']}")
-                        with c2:
-                            st.write("**SAÍDA**")
-                            if row['foto_saida'] and row['foto_saida'] != "---":
-                                st.image(f"data:image/png;base64,{row['foto_saida']}", width=200)
-                            st.caption(f"📍 GPS: {row['geo_saida']}")
-                
-                csv = df_filtrado.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Baixar Relatório CSV", csv, "relatorio_ponto.csv", "text/csv")
-            else:
-                st.info("Nenhum registro no banco de dados.")
-
-        with tab2:
-            st.subheader("Adicionar Novo Funcionário")
-            with st.form("cadastro"):
-                new_id = st.number_input("ID Único", min_value=1)
-                new_nome = st.text_input("Nome Completo")
-                new_cargo = st.text_input("Cargo")
-                if st.form_submit_button("Cadastrar"):
-                    try:
-                        cur = conn.cursor()
-                        cur.execute("INSERT INTO funcionarios (id, nome, cargo, data_criacao) VALUES (?, ?, ?, ?)",
-                                    (new_id, new_nome, new_cargo, datetime.now().strftime("%Y-%m-%d")))
+            with tab2:
+                with st.form("add_func"):
+                    f_id = st.number_input("ID do Crachá", min_value=1)
+                    f_nome = st.text_input("Nome do Colaborador")
+                    f_cargo = st.text_input("Cargo")
+                    if st.form_submit_button("Cadastrar Funcionário"):
+                        conn.execute("INSERT INTO funcionarios (id, empresa_id, nome, cargo) VALUES (?,?,?,?)",
+                                    (f_id, emp_id, f_nome, f_cargo))
                         conn.commit()
-                        st.success("Funcionário cadastrado!")
-                    except:
-                        st.error("Erro: Este ID já existe.")
-            
-            st.subheader("Lista de Funcionários")
-            df_f = pd.read_sql("SELECT * FROM funcionarios", conn)
-            st.table(df_f)
+                        st.success("Cadastrado!")
+        else:
+            st.error("Senha incorreta.")
 
-        with tab3:
-            st.subheader("Segurança e Manutenção")
-            if st.button("🚨 Limpar todos os registros (CUIDADO)"):
-                conn.cursor().execute("DELETE FROM presenca")
+# ----------------------------------------------------------------
+# MÓDULO 3: ADMIN MASTER (SÓ VOCÊ ENTRA AQUI)
+# ----------------------------------------------------------------
+elif modulo == "🛠 Admin Master (Você)":
+    st.title("🛡 Painel de Controle do Desenvolvedor")
+    master_pass = st.text_input("Senha Mestra", type="password")
+    
+    if master_pass == "suasenhamestra123":
+        st.subheader("Cadastrar Nova Empresa Cliente")
+        with st.form("nova_empresa"):
+            e_nome = st.text_input("Nome da Empresa")
+            e_cnpj = st.text_input("CNPJ")
+            e_senha = st.text_input("Definir Senha Admin da Empresa", type="password")
+            if st.form_submit_button("Ativar Empresa"):
+                hash_s = hash_password(e_senha)
+                conn.execute("INSERT INTO empresas (nome, cnpj, senha_admin) VALUES (?,?,?)",
+                            (e_nome, e_cnpj, hash_s))
                 conn.commit()
-                st.rerun()
-    else:
-        st.warning("Insira a senha de administrador na barra lateral.")
+                st.success(f"Empresa {e_nome} ativada com sucesso!")
+        
+        st.subheader("Empresas na Base")
+        st.table(pd.read_sql("SELECT id, nome, cnpj FROM empresas", conn))
