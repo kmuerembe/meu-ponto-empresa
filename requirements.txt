@@ -2,5 +2,4 @@ streamlit
 pandas
 streamlit-js-eval
 pytz
-xlswriter
-passlib
+xlsxwriter
